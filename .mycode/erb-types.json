@@ -1,0 +1,29 @@
+{
+  "types": {
+    "file": {
+      "version": 1,
+      "created": "2026-05-01T14:28:41.781Z",
+      "description": "Read file contents"
+    },
+    "directory": {
+      "version": 1,
+      "created": "2026-05-01T14:28:41.781Z",
+      "description": "List directory contents"
+    },
+    "analysis": {
+      "version": 1,
+      "created": "2026-05-01T14:28:41.781Z",
+      "description": "Analyze code"
+    },
+    "refactor": {
+      "version": 1,
+      "created": "2026-05-01T14:28:41.781Z",
+      "description": "Refactor code"
+    },
+    "test": {
+      "version": 1,
+      "created": "2026-05-01T14:28:41.781Z",
+      "description": "Run or create tests"
+    }
+  }
+}
