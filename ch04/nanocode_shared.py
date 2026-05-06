@@ -7,6 +7,7 @@ This version uses the shared brains module instead of duplicating brain code.
 
 import sys
 import os
+# Add parent directory to Python path to import brains module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from brains import (
