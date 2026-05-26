@@ -1,12 +1,16 @@
-"""Tests for Nanocode v1.0 (Chapter 12 - The Capstone)."""
+"""Tests for Nanocode v1.1 (Chapter 12 - The Capstone)."""
 
 import os
+import json
+import threading
 import tempfile
+import pytest
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from nanocode import (
     Agent, AgentStop, Thought, ToolCall, Memory, ToolContext,
     ReadFile, WriteFile, WritePlan, ListFiles, SearchCodebase, SaveMemory, RunCommand, SearchWeb,
-    BRAINS, tools, get_tool, tool_definitions
+    BRAINS, tools, get_tool, tool_definitions, M365
 )
 
 
@@ -231,12 +235,12 @@ def test_ollama_in_brains_registry():
     assert "ollama" in BRAINS
 
 
-def test_version_is_1_0():
-    """Verify version number is 1.0 in main()."""
+def test_version_is_1_1():
+    """Verify version number is 1.1 in main()."""
     import nanocode
     import inspect
     source = inspect.getsource(nanocode.main)
-    assert "v1.0" in source
+    assert "v1.1" in source
 
 
 # --- Context Compaction Tests ---
@@ -260,3 +264,270 @@ def test_compact_conversation_summarizes():
     # After compaction, conversation should be short (summary + current response)
     assert len(agent.conversation) <= 4
     assert "Summary" in str(agent.conversation[0]["content"])
+
+
+# --- M365 Brain Tests ---
+
+
+class FakeM365Server:
+    """Tiny HTTP server that mimics the Puppeteer server v2 Anthropic API."""
+
+    def __init__(self, port=13000):
+        self.port = port
+        self.responses = []
+        self.requests_received = []
+        self._server = None
+
+    def start(self):
+        """Start in background thread."""
+        server_ref = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/health':
+                    self._json(200, {"status": "ok", "session": {"ready": True}})
+                elif self.path == '/v1/models':
+                    self._json(200, {"object": "list", "data": [{"id": "m365-copilot"}]})
+                else:
+                    self._json(404, {"error": "not found"})
+
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length))
+                server_ref.requests_received.append(body)
+
+                default_resp = {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Hello from M365"}],
+                    "model": "m365-copilot",
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 100, "output_tokens": 50},
+                }
+                resp = server_ref.responses.pop(0) if server_ref.responses else default_resp
+                self._json(200, resp)
+
+            def _json(self, code, data):
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(data).encode())
+
+            def log_message(self, *args):
+                pass
+
+        class ReusableHTTPServer(HTTPServer):
+            allow_reuse_address = True
+
+        self._server = ReusableHTTPServer(('127.0.0.1', self.port), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._server:
+            self._server.shutdown()
+
+
+def test_m365_in_brains_registry():
+    """Verify M365 is in the BRAINS registry."""
+    assert "m365" in BRAINS
+
+
+def test_m365_health_check_fails_when_server_down():
+    """Verify M365 raises ValueError when server unreachable."""
+    original_url = os.environ.get("M365_BASE_URL")
+    os.environ["M365_BASE_URL"] = "http://127.0.0.1:19999"
+    try:
+        with pytest.raises(ValueError, match="Cannot connect"):
+            M365()
+    finally:
+        if original_url is None:
+            os.environ.pop("M365_BASE_URL", None)
+        else:
+            os.environ["M365_BASE_URL"] = original_url
+
+
+def test_m365_text_response():
+    """Verify M365 brain parses text response correctly."""
+    server = FakeM365Server()
+    server.start()
+    try:
+        brain = M365.__new__(M365)  # Skip __init__ health check
+        brain.base_url = f"http://127.0.0.1:{server.port}"
+        brain.url = f"{brain.base_url}/v1/messages"
+        brain.tools = []
+        brain.system = None
+        brain.model = "m365-copilot"
+        brain.memory = None
+        brain.timeout = 10
+
+        thought = brain.think([{"role": "user", "content": "Hello"}])
+        assert thought.text == "Hello from M365"
+        assert thought.tool_calls == []
+    finally:
+        server.stop()
+
+
+def test_m365_tool_call_response():
+    """Verify M365 brain parses tool_use response correctly."""
+    server = FakeM365Server(port=13001)
+    server.responses.append({
+        "id": "msg_tool",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "Let me read that file."},
+            {"type": "tool_use", "id": "toolu_123", "name": "read_file",
+             "input": {"path": "/tmp/test.py"}},
+        ],
+        "model": "m365-copilot",
+        "stop_reason": "tool_use",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+    })
+    server.start()
+    try:
+        brain = M365.__new__(M365)
+        brain.base_url = f"http://127.0.0.1:{server.port}"
+        brain.url = f"{brain.base_url}/v1/messages"
+        brain.tools = []
+        brain.system = None
+        brain.model = "m365-copilot"
+        brain.memory = None
+        brain.timeout = 10
+
+        thought = brain.think([{"role": "user", "content": "Read /tmp/test.py"}])
+        assert thought.text == "Let me read that file."
+        assert len(thought.tool_calls) == 1
+        assert thought.tool_calls[0].name == "read_file"
+        assert thought.tool_calls[0].args == {"path": "/tmp/test.py"}
+    finally:
+        server.stop()
+
+
+def test_m365_sends_system_and_tools():
+    """Verify system prompt and tool definitions are included in request."""
+    server = FakeM365Server(port=13004)
+    server.start()
+    try:
+        brain = M365.__new__(M365)
+        brain.base_url = f"http://127.0.0.1:{server.port}"
+        brain.url = f"{brain.base_url}/v1/messages"
+        brain.system = "You are a coding agent."
+        brain.tools = [{
+            "name": "read_file",
+            "description": "Read a file",
+            "input_schema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }
+        }]
+        brain.model = "m365-copilot"
+        brain.memory = None
+        brain.timeout = 10
+
+        brain.think([{"role": "user", "content": "Hello"}])
+
+        req = server.requests_received[0]
+        assert req["system"] == "You are a coding agent."
+        assert len(req["tools"]) == 1
+        assert req["tools"][0]["name"] == "read_file"
+    finally:
+        server.stop()
+
+
+def test_m365_multi_tool_calls():
+    """Verify M365 brain parses multiple tool_use blocks correctly."""
+    server = FakeM365Server(port=13002)
+    server.responses.append({
+        "id": "msg_multi",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "toolu_1", "name": "read_file",
+             "input": {"path": "a.py"}},
+            {"type": "tool_use", "id": "toolu_2", "name": "read_file",
+             "input": {"path": "b.py"}},
+        ],
+        "model": "m365-copilot",
+        "stop_reason": "tool_use",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+    })
+    server.start()
+    try:
+        brain = M365.__new__(M365)
+        brain.base_url = f"http://127.0.0.1:{server.port}"
+        brain.url = f"{brain.base_url}/v1/messages"
+        brain.tools = []
+        brain.system = None
+        brain.model = "m365-copilot"
+        brain.memory = None
+        brain.timeout = 10
+
+        thought = brain.think([{"role": "user", "content": "Read both files"}])
+        assert len(thought.tool_calls) == 2
+        assert thought.tool_calls[0].args == {"path": "a.py"}
+        assert thought.tool_calls[1].args == {"path": "b.py"}
+    finally:
+        server.stop()
+
+
+def test_m365_with_agent_tool_loop():
+    """Full integration: M365 brain + agent executes tool call and sends result back."""
+    server = FakeM365Server(port=13003)
+    # First call: M365 asks to read a file
+    server.responses.append({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "Reading the file..."},
+            {"type": "tool_use", "id": "toolu_r", "name": "read_file",
+             "input": {"path": ".nanocode/memory.md"}},
+        ],
+        "model": "m365-copilot",
+        "stop_reason": "tool_use",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+    })
+    # Second call: M365 gives final answer after seeing tool result
+    server.responses.append({
+        "id": "msg_2",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "The memory file says: Nanocode"}],
+        "model": "m365-copilot",
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+    })
+    server.start()
+    try:
+        brain = M365.__new__(M365)
+        brain.base_url = f"http://127.0.0.1:{server.port}"
+        brain.url = f"{brain.base_url}/v1/messages"
+        brain.tools = tool_definitions(tools)
+        brain.system = None
+        brain.model = "m365-copilot"
+        brain.memory = None
+        brain.timeout = 10
+        brain.context_limit = 200_000
+        brain.last_input_tokens = 0
+
+        agent = Agent(brain=brain, tools=tools, mode="act", brain_name="m365")
+        output = agent.handle_input("What does the memory file say?")
+
+        assert "Nanocode" in output
+        assert len(server.requests_received) == 2
+        # Second request should contain the tool_result
+        second_req = server.requests_received[1]
+        assert second_req["messages"][-1]["role"] == "user"
+        last_content = second_req["messages"][-1]["content"]
+        if isinstance(last_content, list):
+            assert any(b.get("type") == "tool_result" for b in last_content)
+    finally:
+        server.stop()

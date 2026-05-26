@@ -14,11 +14,11 @@ load_dotenv()
 
 # --- HTTP Helpers ---
 
-def request_with_retry(url, headers, payload, max_retries=10):
+def request_with_retry(url, headers, payload, max_retries=10, timeout=120):
     """Make HTTP POST with retry on rate limit (429), server errors (5xx), and network failures."""
     for attempt in range(max_retries):
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout)
         except requests.exceptions.RequestException as e:
             wait_time = 2 ** attempt
             print(f"Network error: {e}. Retrying in {wait_time}s...")
@@ -190,6 +190,54 @@ class Claude(Brain):
         return self._parse_response(data["content"])
 
 
+class M365(Brain):
+    """M365 Copilot via Puppeteer Server v2 (Anthropic-compatible)."""
+
+    def __init__(self, memory=None, tools=None):
+        self.memory = memory
+        self.tools = tools or []
+        self.system = None
+        self.base_url = os.getenv("M365_BASE_URL", "http://127.0.0.1:3000")
+        self.model = "m365-copilot"
+        self.timeout = int(os.getenv("M365_REQUEST_TIMEOUT", "120"))
+        self.url = f"{self.base_url}/v1/messages"
+        self._check_server()
+
+    def _check_server(self):
+        """Verify Puppeteer server is running at startup."""
+        try:
+            resp = requests.get(f"{self.base_url}/health", timeout=5)
+            data = resp.json()
+            if not data.get("session", {}).get("ready"):
+                raise ValueError(f"M365 server not ready: {data}")
+        except requests.exceptions.ConnectionError:
+            raise ValueError(
+                f"Cannot connect to M365 server at {self.base_url}.\n"
+                f"Start it first: cd m365-puppeteer-server && npm run start:v2"
+            )
+
+    def think(self, conversation):
+        headers = {
+            "x-api-key": "m365",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
+        payload = {
+            "model": self.model,
+            "max_tokens": 16000,
+            "messages": conversation
+        }
+        if self.system:
+            payload["system"] = self.system
+        if self.tools:
+            payload["tools"] = self.tools
+
+        response = request_with_retry(self.url, headers, payload, timeout=self.timeout)
+        data = response.json()
+        self.last_input_tokens = data.get("usage", {}).get("input_tokens", 0)
+        return self._parse_response(data["content"])
+
+
 class DeepSeek(Brain):
     """DeepSeek API (Anthropic-compatible, with tool support)."""
     context_limit = 128_000
@@ -279,6 +327,7 @@ class Ollama(Brain):
 # Available brains
 BRAINS = {
     "claude": Claude,
+    "m365": M365,
     "deepseek": DeepSeek,
     "ollama": Ollama,
 }
@@ -746,7 +795,7 @@ def main():
     brain = BRAINS[brain_name](memory=memory, tools=tool_definitions(tools))
     agent = Agent(brain=brain, tools=tools, memory=memory, mode=mode, brain_name=brain_name)
 
-    print(f"⚡ Nanocode v1.0")
+    print(f"⚡ Nanocode v1.1")
     print(f"Commands: /q quit, /switch toggle brain, /mode [plan|act]")
     print(f"Brain: {brain_name}")
     if mode == "act":

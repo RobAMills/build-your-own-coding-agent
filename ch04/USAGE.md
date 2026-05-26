@@ -1,3 +1,6 @@
+NANOCODE_BRAIN=zai python ch04/nanocode_shared.py
+NANOCODE_BRAIN=claude python ch04/nanocode_shared.py
+
 # Quick Start Guide - Z.ai Coding Plan Integration
 
 ## 🚀 Setup in 3 Steps
