@@ -362,6 +362,7 @@ def test_m365_text_response():
         brain.model = "m365-copilot"
         brain.memory = None
         brain.timeout = 10
+        brain._system_sent = False
 
         thought = brain.think([{"role": "user", "content": "Hello"}])
         assert thought.text == "Hello from M365"
@@ -397,6 +398,7 @@ def test_m365_tool_call_response():
         brain.model = "m365-copilot"
         brain.memory = None
         brain.timeout = 10
+        brain._system_sent = False
 
         thought = brain.think([{"role": "user", "content": "Read /tmp/test.py"}])
         assert thought.text == "Let me read that file."
@@ -407,8 +409,8 @@ def test_m365_tool_call_response():
         server.stop()
 
 
-def test_m365_sends_system_and_tools():
-    """Verify system prompt and tool definitions are included in request."""
+def test_m365_sends_system_and_tools_on_first_call_only():
+    """Verify system prompt and tools sent on first think(), omitted on subsequent calls."""
     server = FakeM365Server(port=13004)
     server.start()
     try:
@@ -428,13 +430,20 @@ def test_m365_sends_system_and_tools():
         brain.model = "m365-copilot"
         brain.memory = None
         brain.timeout = 10
+        brain._system_sent = False
 
+        # First call — system and tools should be present
         brain.think([{"role": "user", "content": "Hello"}])
+        req1 = server.requests_received[0]
+        assert req1["system"] == "You are a coding agent."
+        assert len(req1["tools"]) == 1
+        assert req1["tools"][0]["name"] == "read_file"
 
-        req = server.requests_received[0]
-        assert req["system"] == "You are a coding agent."
-        assert len(req["tools"]) == 1
-        assert req["tools"][0]["name"] == "read_file"
+        # Second call — system and tools should NOT be present
+        brain.think([{"role": "user", "content": "Hello again"}])
+        req2 = server.requests_received[1]
+        assert "system" not in req2, f"System prompt should not be sent on second call, got: {req2.get('system')}"
+        assert "tools" not in req2, f"Tools should not be sent on second call, got: {req2.get('tools')}"
     finally:
         server.stop()
 
@@ -468,6 +477,7 @@ def test_m365_multi_tool_calls():
         brain.memory = None
         brain.timeout = 10
 
+        brain._system_sent = False
         thought = brain.think([{"role": "user", "content": "Read both files"}])
         assert len(thought.tool_calls) == 2
         assert thought.tool_calls[0].args == {"path": "a.py"}
@@ -516,6 +526,7 @@ def test_m365_with_agent_tool_loop():
         brain.memory = None
         brain.timeout = 10
         brain.context_limit = 200_000
+        brain._system_sent = False
         brain.last_input_tokens = 0
 
         agent = Agent(brain=brain, tools=tools, mode="act", brain_name="m365")

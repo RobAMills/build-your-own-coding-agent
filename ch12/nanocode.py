@@ -201,6 +201,7 @@ class M365(Brain):
         self.model = "m365-copilot"
         self.timeout = int(os.getenv("M365_REQUEST_TIMEOUT", "120"))
         self.url = f"{self.base_url}/v1/messages"
+        self._system_sent = False
         self._check_server()
 
     def _check_server(self):
@@ -227,10 +228,14 @@ class M365(Brain):
             "max_tokens": 16000,
             "messages": conversation
         }
-        if self.system:
-            payload["system"] = self.system
-        if self.tools:
-            payload["tools"] = self.tools
+        # Send system prompt + tool definitions only on first request.
+        # M365 Copilot manages its own conversation context server-side.
+        if not self._system_sent:
+            if self.system:
+                payload["system"] = self.system
+            if self.tools:
+                payload["tools"] = self.tools
+            self._system_sent = True
 
         response = request_with_retry(self.url, headers, payload, timeout=self.timeout)
         data = response.json()
