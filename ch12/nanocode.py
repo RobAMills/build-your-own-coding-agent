@@ -21,17 +21,32 @@ def request_with_retry(url, headers, payload, max_retries=10, timeout=120):
             response = requests.post(url, headers=headers, json=payload, timeout=timeout)
         except requests.exceptions.RequestException as e:
             wait_time = 2 ** attempt
-            print(f"Network error: {e}. Retrying in {wait_time}s...")
+            print(f"Network error: {e}. Retrying in {wait_time}s... (Ctrl+C to cancel)")
             time.sleep(wait_time)
             continue
 
         if response.status_code == 429 or response.status_code >= 500:
+            # Check for non-retryable server errors (detached frame, browser crash)
+            if response.status_code == 500:
+                try:
+                    error_msg = response.json().get("error", {}).get("message", "")
+                except (ValueError, AttributeError):
+                    error_msg = response.text or ""
+                non_retryable = ["detached", "frame", "session not ready",
+                                 "browser", "Session", "navigate"]
+                if any(kw in error_msg for kw in non_retryable):
+                    raise Exception(
+                        f"Server error (not retryable): {error_msg}\n"
+                        f"The M365 browser session may have disconnected. "
+                        f"Restart the Puppeteer server."
+                    )
+
             retry_after = response.headers.get("retry-after")
             try:
                 wait_time = int(retry_after) if retry_after else 2 ** attempt
             except (ValueError, TypeError):
                 wait_time = 2 ** attempt
-            print(f"Error {response.status_code}. Retrying in {wait_time}s...")
+            print(f"Error {response.status_code}. Retrying in {wait_time}s... (Ctrl+C to cancel)")
             time.sleep(wait_time)
             continue
 
@@ -676,6 +691,9 @@ class Agent:
 
         try:
             return self._agentic_loop()
+        except KeyboardInterrupt:
+            print("\n⚠️  Interrupted — returning to prompt. Conversation preserved.")
+            return "(Interrupted)"
         except Exception as e:
             self.conversation.pop()  # Remove failed user message
             return f"Error: {e}"
